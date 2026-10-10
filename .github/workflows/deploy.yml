@@ -1,0 +1,48 @@
+name: Deploy Worker
+
+# Deploys to Cloudflare on every push to main, then checks /v1/health.
+# Skips with a notice until the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets exist.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+    steps:
+      - if: env.HAS_TOKEN != 'true'
+        run: echo "::notice::Cloudflare secrets are not set, so nothing was deployed."
+      - uses: actions/checkout@v7
+        if: env.HAS_TOKEN == 'true'
+      - uses: actions/setup-node@v6
+        if: env.HAS_TOKEN == 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - if: env.HAS_TOKEN == 'true'
+        run: npm ci && npm test
+      - name: Deploy
+        if: env.HAS_TOKEN == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler deploy 2>&1 | tee deploy.log
+          URL=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          echo "URL=$URL" >> "$GITHUB_ENV"
+          echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Smoke test
+        if: env.HAS_TOKEN == 'true'
+        run: |
+          for i in 1 2 3 4 5; do curl -fsS "$URL/v1/health" | grep -q '"ok":true' && exit 0; sleep 5; done
+          echo "::error::$URL/v1/health did not answer ok"; exit 1
