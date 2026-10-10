@@ -1,0 +1,184 @@
+name: Claude agent (cloud)
+
+# AI developer that runs on GitHub, laptop not needed.
+# Picks the oldest issue labeled `ready`, implements it with tests, opens a PR.
+# If the Claude usage limit is hit, the issue goes back to `ready` and the next
+# run restarts itself once the limit resets (retry-timer job).
+# Needs repo secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, uses your Claude Pro plan).
+on:
+  schedule:
+    - cron: "12 * * * *"
+    - cron: "42 * * * *"
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+  id-token: write
+
+concurrency:
+  group: claude-agent
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Auto-merge finished agent PRs
+        run: .github/scripts/automerge.sh 0
+
+  pick:
+    needs: sweep
+    if: github.event_name != 'issues' || github.event.label.name == 'ready'
+    runs-on: ubuntu-latest
+    outputs:
+      number: ${{ steps.pick.outputs.number }}
+      title: ${{ steps.pick.outputs.title }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::CLAUDE_CODE_OAUTH_TOKEN not set — agent idle."; exit 0; fi
+          ISSUE=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number,title \
+                  --jq 'sort_by(.number) | .[0] // empty')
+          [ -z "$ISSUE" ] && exit 0
+          echo "number=$(jq -r .number <<<"$ISSUE")" >> "$GITHUB_OUTPUT"
+          { echo 'title<<EOF'; jq -r .title <<<"$ISSUE"; echo EOF; } >> "$GITHUB_OUTPUT"
+
+  implement:
+    needs: pick
+    if: needs.pick.outputs.number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      N: ${{ needs.pick.outputs.number }}
+      TITLE: ${{ needs.pick.outputs.title }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Claim issue
+        run: |
+          gh issue edit "$N" --remove-label ready --add-label in-progress
+          git checkout -b "agent/issue-$N"
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_bots: "github-actions"
+          prompt: |
+            You are the engineer for this repo. Read CLAUDE.md first.
+            Implement GitHub issue #${{ needs.pick.outputs.number }} ("${{ needs.pick.outputs.title }}").
+            Get details with: gh issue view ${{ needs.pick.outputs.number }}
+            Write tests first, then code. Run the test and lint commands from CLAUDE.md until green.
+            Never add email addresses or other personal data to files; for contact links use GitHub URLs.
+            Do NOT commit, push, or create PRs — the workflow does that. Finish with a 3-line summary.
+          claude_args: --max-turns 40 --allowedTools "Read,Write,Edit,Glob,Grep,Bash"
+      - name: Show Claude result
+        if: always() && steps.claude.outputs.execution_file != ''
+        run: |
+          MSG=$(jq -r '[.[] | select(.type=="result")][-1] | "\(.api_error_status // "") \(.result // "")"' "${{ steps.claude.outputs.execution_file }}" 2>/dev/null | tr '\n\r' '  ' | head -c 300)
+          echo "Claude result: $MSG"
+          echo "### Claude result\n$MSG" >> "$GITHUB_STEP_SUMMARY"
+          echo "CLAUDE_MSG=$MSG" >> "$GITHUB_ENV"
+      - name: Open PR
+        if: success()
+        run: |
+          git config user.name "claude-agent"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # Move the changes onto the latest main: workflow files pushed to main during the run would
+          # otherwise count as agent edits, which GITHUB_TOKEN is not allowed to push.
+          if ! git diff --cached --quiet; then
+            git stash -q && git fetch -q origin main && git checkout -q -B "agent/issue-$N" origin/main && git stash pop -q && git add -A
+          fi
+          if git diff --cached --quiet; then
+            gh issue edit "$N" --remove-label in-progress --add-label needs-human
+            gh issue comment "$N" -b "Agent finished without code changes — needs a human look."
+            exit 0
+          fi
+          git commit -m "Implement #$N: $TITLE"
+          # Drop any stale branch from an earlier attempt: re-pushing over it would make
+          # newer main commits (incl. workflow files) count as agent changes and be rejected.
+          git push origin --delete "agent/issue-$N" >/dev/null 2>&1 || true
+          git push -u origin "agent/issue-$N"
+          URL=$(gh pr create --title "#$N: $TITLE" \
+                --body "Closes #$N. Implemented by the cloud Claude agent — review before merging.")
+          gh issue edit "$N" --remove-label in-progress --add-label review
+          # PRs opened with GITHUB_TOKEN don't auto-trigger CI; dispatch it explicitly.
+          for w in ci.yml codeql.yml "Android CI" ; do gh workflow run "$w" --ref "agent/issue-$N" 2>/dev/null || true; done
+          echo "PR: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Wait for CI and auto-merge
+        if: success()
+        run: |
+          git checkout -q main 2>/dev/null || true
+          git fetch -q origin main && git checkout -q origin/main -- .github/scripts/automerge.sh 2>/dev/null || true
+          bash .github/scripts/automerge.sh 1500
+      - name: Retry later (usage limit or failure)
+        if: failure() || cancelled()
+        run: |
+          # A Claude usage limit is not the task's fault, so it never counts toward the 3-failure limit.
+          if grep -qiE "^ *429|hit your .*limit|usage limit" <<<"${CLAUDE_MSG:-}"; then
+            gh issue edit "$N" --remove-label in-progress --add-label ready
+            gh issue comment "$N" -b "Paused: Claude usage limit (${CLAUDE_MSG}). The agent restarts itself after the reset. Logs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            exit 0
+          fi
+          FAILS=$(gh issue view "$N" --json comments --jq '[.comments[].body | select(startswith("Agent run failed"))] | length')
+          if [ "$FAILS" -ge 3 ]; then
+            gh issue edit "$N" --remove-label in-progress --add-label needs-human
+            gh issue comment "$N" -b "Agent run failed 3 times — handing to a human. Logs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            gh issue edit "$N" --remove-label in-progress --add-label ready
+            gh issue comment "$N" -b "Agent run failed: ${CLAUDE_MSG:-unknown}. Will retry automatically in about an hour. Logs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+  continue:
+    # Chain straight into the next task when this one succeeded (no 2h wait).
+    # On failure / usage limit we do NOT chain; the schedule retries later.
+    needs: implement
+    if: success()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          LEFT=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number --jq length)
+          if [ "$LEFT" -gt 0 ]; then gh workflow run claude-agent.yml -R "$GITHUB_REPOSITORY" --ref main && echo "▶ $LEFT task(s) left — started next run"; fi
+
+  retry-timer:
+    # GitHub often skips scheduled runs for hours, so a failed or usage-limited run restarts the
+    # agent itself: it waits until the limit resets (or about an hour), then dispatches a new run.
+    needs: [pick, implement]
+    # !cancelled(): a run cancelled on purpose must not start a timer; a timed-out job still retries.
+    if: ${{ !cancelled() && (needs.implement.result == 'failure' || needs.implement.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: ${{ needs.pick.outputs.number }}
+    steps:
+      - run: |
+          MSG=$(gh issue view "$N" -R "$GITHUB_REPOSITORY" --json comments --jq '.comments[-1].body' 2>/dev/null || true)
+          WAIT=3300
+          T=$(grep -oE 'resets [^(.]*' <<<"$MSG" | head -1 | sed 's/^resets //; s/[·,]//g')
+          if [ -n "$T" ] && TS=$(date -u -d "$T" +%s 2>/dev/null); then
+            NOW=$(date +%s); [ "$TS" -le "$NOW" ] && TS=$((TS + 86400))
+            WAIT=$((TS - NOW + 120))
+          fi
+          [ "$WAIT" -gt 20700 ] && WAIT=20700
+          echo "Waiting $((WAIT / 60)) min, then restarting the agent"
+          sleep "$WAIT"
+          LEFT=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number --jq length)
+          if [ "$LEFT" -gt 0 ]; then gh workflow run claude-agent.yml -R "$GITHUB_REPOSITORY" --ref main; else echo "Nothing queued"; fi

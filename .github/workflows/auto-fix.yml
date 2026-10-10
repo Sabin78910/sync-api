@@ -1,0 +1,31 @@
+name: Auto-fix failing main
+
+# When CI fails on main, open a `ready` issue so the Claude agent fixes it.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  issues: write
+  actions: write
+
+jobs:
+  ticket:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          gh issue list --label ci-failure --state open --json number --jq length | grep -qx 0 || exit 0
+          gh label create ci-failure --color B60205 --force >/dev/null
+          gh issue create --label ready --label ci-failure --label bug \
+            --title "Fix failing CI on main (CI)" \
+            --body "CI failed on main at ${{ github.event.workflow_run.head_sha }}.
+          Run: ${{ github.event.workflow_run.html_url }}
+          Read the failed logs with: gh run view ${{ github.event.workflow_run.id }} --log-failed
+          Fix the root cause with a minimal change and keep all tests green."
+          gh workflow run claude-agent.yml  # issues created by this token don't trigger the agent

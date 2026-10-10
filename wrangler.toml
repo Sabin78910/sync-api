@@ -1,0 +1,17 @@
+# Sabin Sync: end-to-end encrypted sync for the web apps. One Durable Object (SQLite) per sync space.
+# The server stores only ciphertext; the key never leaves the user's devices.
+name = "sync-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "SPACES"
+class_name = "SyncSpace"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncSpace"]
+
+[observability]
+enabled = true
