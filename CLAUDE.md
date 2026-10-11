@@ -1,22 +1,33 @@
 # Sync API
-Purpose: end-to-end encrypted sync backend for Sabin's web apps (Cloudflare Worker + SQLite Durable Object per space).
+End to end encrypted sync for every Sabin Labs app. The server stores only ciphertext.
+
+## Stack
+Cloudflare Worker · SQLite Durable Object per sync space · TypeScript · Vitest · wrangler.
 
 ## Commands
-- Test: `npm test`
-- Lint: `npm run typecheck`
-- Build: `npx wrangler deploy --dry-run --outdir dist`
+- Dev: `npx wrangler dev` · Deploy: `npm run deploy`
+- Test: `npm test` · Lint: `npm run typecheck`
+- Build check: `npx wrangler deploy --dry-run --outdir dist`
 
 ## Architecture
-- src/space.ts: pure request handling (auth, versions, limits) with a storage interface. Fully tested.
-- src/index.ts: Worker router + `SyncSpace` Durable Object (SQLite) wrapping space.ts.
-- client/sync.ts: browser client that apps copy (WebCrypto AES-GCM, HKDF). Tested end to end against space.ts.
+- `src/space.ts` pure request handling (auth, versions, limits) behind a storage interface. Fully tested.
+- `src/index.ts` router plus the `SyncSpace` Durable Object.
+- `client/sync.ts` the browser client apps copy. Tested end to end against space.ts.
 
-## Rules
-- The server must never see plaintext or the sync secret. Never log request bodies or tokens.
-- Every behavior change needs a test. Run tests and typecheck before finishing.
-- Never weaken CORS, auth, size or rate limits without an issue that says so.
-- Never commit secrets, .dev.vars or .env files, or email addresses.
-- Keep PRs under ~300 changed lines; one issue per PR.
+## Data rules
+- The server must never see plaintext or the sync secret. Never log a request body or a token.
+- Writes use optimistic versioning: a stale write returns 409 and the client merges and retries.
+- Limits are deliberate: 256KB per document, 30 writes a minute, CORS only for our own origins.
+  Never weaken them without an issue that says so.
 
-## Definition of done
-Typecheck clean, tests pass, CI green, short summary, PR opened as draft.
+## Testing rules
+- Every behaviour change needs a test, including the refusal cases (wrong token, stale version, oversize body).
+- Run typecheck and tests before finishing.
+
+## Security and git
+- Never commit secrets, keystores, .env files or email addresses.
+- Keep the Content-Security-Policy strict; add a host to connect-src only when a feature needs it.
+- `main` is protected: branch, open a PR, merge when CI is green. One issue per PR, under ~300 lines.
+
+## Done when
+Typecheck clean, tests pass, CI green, PR opened with a three line summary.
