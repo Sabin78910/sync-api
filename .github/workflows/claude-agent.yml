@@ -47,6 +47,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: |
+          if [ "$(date -u +%s)" -ge 1791850500 ]; then echo "::notice::Build loop stopped by the owner on 2026-10-13 (06:00 Nepal time)."; exit 0; fi
           if [ "$HAS_TOKEN" != "true" ]; then echo "::notice::CLAUDE_CODE_OAUTH_TOKEN not set — agent idle."; exit 0; fi
           ISSUE=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number,title \
                   --jq 'sort_by(.number) | .[0] // empty')
