@@ -6,11 +6,6 @@ name: Claude agent (cloud)
 # run restarts itself once the limit resets (retry-timer job).
 # Needs repo secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, uses your Claude Pro plan).
 on:
-  schedule:
-    - cron: "12 * * * *"
-    - cron: "42 * * * *"
-  issues:
-    types: [labeled]
   workflow_dispatch:
 
 permissions:
@@ -156,14 +151,14 @@ jobs:
     steps:
       - run: |
           LEFT=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number --jq length)
-          if [ "$LEFT" -gt 0 ]; then gh workflow run claude-agent.yml -R "$GITHUB_REPOSITORY" --ref main && echo "▶ $LEFT task(s) left — started next run"; fi
+          if [ "$LEFT" -gt 0 ]; then echo "agent restart disabled by owner"; fi
 
   retry-timer:
     # GitHub often skips scheduled runs for hours, so a failed or usage-limited run restarts the
     # agent itself: it waits until the limit resets (or about an hour), then dispatches a new run.
     needs: [pick, implement]
     # !cancelled(): a run cancelled on purpose must not start a timer; a timed-out job still retries.
-    if: ${{ !cancelled() && (needs.implement.result == 'failure' || needs.implement.result == 'cancelled') }}
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
     env:
@@ -182,4 +177,4 @@ jobs:
           echo "Waiting $((WAIT / 60)) min, then restarting the agent"
           sleep "$WAIT"
           LEFT=$(gh issue list -R "$GITHUB_REPOSITORY" --label ready --state open --json number --jq length)
-          if [ "$LEFT" -gt 0 ]; then gh workflow run claude-agent.yml -R "$GITHUB_REPOSITORY" --ref main; else echo "Nothing queued"; fi
+          if [ "$LEFT" -gt 0 ]; then echo "agent restart disabled by owner"; else echo "Nothing queued"; fi

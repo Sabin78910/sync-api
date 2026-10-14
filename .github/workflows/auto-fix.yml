@@ -2,10 +2,7 @@ name: Auto-fix failing main
 
 # When CI fails on main, open a `ready` issue so the Claude agent fixes it.
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   issues: write
@@ -28,4 +25,4 @@ jobs:
           Run: ${{ github.event.workflow_run.html_url }}
           Read the failed logs with: gh run view ${{ github.event.workflow_run.id }} --log-failed
           Fix the root cause with a minimal change and keep all tests green."
-          gh workflow run claude-agent.yml  # issues created by this token don't trigger the agent
+          echo "agent restart disabled by owner"
